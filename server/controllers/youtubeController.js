@@ -1,6 +1,4 @@
 // controllers/youtubeController.js
-// Pure fetch-based implementation — zero third-party YouTube packages.
-
 const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 
 const WEB_HEADERS = {
@@ -16,27 +14,16 @@ function extractVideos(items) {
   for (const item of items) {
     const vr = item.videoRenderer || item.compactVideoRenderer;
     if (!vr || !vr.videoId) continue;
-
     const title = vr.title?.runs?.[0]?.text || vr.title?.simpleText || 'Unknown Title';
     const artist = vr.ownerText?.runs?.[0]?.text || vr.shortBylineText?.runs?.[0]?.text || 'Unknown Artist';
     const durationText = vr.lengthText?.simpleText || vr.lengthText?.runs?.[0]?.text || '0:00';
-
     const parts = durationText.split(':').map(Number);
     const durationSeconds =
       parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] :
       parts.length === 2 ? parts[0] * 60 + parts[1] : 0;
-
     const thumbnails = vr.thumbnail?.thumbnails || [];
     const thumbnail = thumbnails[thumbnails.length - 1]?.url || thumbnails[0]?.url || '';
-
-    results.push({
-      id: vr.videoId,
-      title,
-      artist,
-      duration: durationSeconds,
-      thumbnail,
-      type: 'youtube',
-    });
+    results.push({ id: vr.videoId, title, artist, duration: durationSeconds, thumbnail, type: 'youtube' });
   }
   return results;
 }
@@ -60,15 +47,8 @@ async function searchYouTubeWeb(query) {
     headers: WEB_HEADERS,
     body: JSON.stringify({
       query,
-      params: 'EgIQAQ%3D%3D', // filter: only videos
-      context: {
-        client: {
-          clientName: 'WEB',
-          clientVersion: '2.20231121.09.00',
-          hl: 'en',
-          gl: 'US',
-        },
-      },
+      params: 'EgIQAQ%3D%3D',
+      context: { client: { clientName: 'WEB', clientVersion: '2.20231121.09.00', hl: 'en', gl: 'US' } },
     }),
   });
   const data = await response.json();
@@ -76,77 +56,48 @@ async function searchYouTubeWeb(query) {
   return extractVideos(rawItems).slice(0, 20);
 }
 
-// Try multiple clients in order until one returns streaming data.
-// TV_EMBEDDED is the most reliable unauthenticated client as of 2025.
-// WEB_EMBEDDED is the fallback.
+// Single, well-formed ANDROID client request. The ANDROID client returns
+// direct, non-throttled URLs without needing signature deciphering, and
+// does not require the extra embed/thirdParty fields the TV/WEB embedded
+// clients need — which is what was likely causing every previous fallback
+// attempt to silently return no streamingData.
 async function fetchStreamingData(videoId) {
-  const clients = [
-    {
-      // TV Embedded — most reliable, bypasses many restrictions
-      clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
-      clientVersion: '2.0',
-      extra: {
-        thirdParty: { embedUrl: 'https://www.youtube.com/' },
+  const body = {
+    videoId,
+    context: {
+      client: {
+        clientName: 'ANDROID',
+        clientVersion: '19.09.37',
+        androidSdkVersion: 30,
+        hl: 'en',
+        gl: 'US',
+        platform: 'MOBILE',
       },
     },
-    {
-      // Web Embedded — fallback
-      clientName: 'WEB_EMBEDDED_PLAYER',
-      clientVersion: '2.20231121.09.00',
-      extra: {
-        thirdParty: { embedUrl: 'https://www.youtube.com/' },
+    playbackContext: {
+      contentPlaybackContext: {
+        html5Preference: 'HTML5_PREF_WANTS',
       },
     },
-    {
-      // Plain WEB — last resort
-      clientName: 'WEB',
-      clientVersion: '2.20231121.09.00',
-      extra: {},
+    contentCheckOk: true,
+    racyCheckOk: true,
+  };
+
+  const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${YT_API_KEY}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+      'X-YouTube-Client-Name': '3',
+      'X-YouTube-Client-Version': '19.09.37',
     },
-  ];
+    body: JSON.stringify(body),
+  });
 
-  for (const client of clients) {
-    try {
-      const body = {
-        videoId,
-        context: {
-          client: {
-            clientName: client.clientName,
-            clientVersion: client.clientVersion,
-            hl: 'en',
-            gl: 'US',
-          },
-          ...client.extra,
-        },
-        racyCheckOk: true,
-        contentCheckOk: true,
-      };
-
-      const response = await fetch(
-        `https://www.youtube.com/youtubei/v1/player?key=${YT_API_KEY}`,
-        {
-          method: 'POST',
-          headers: WEB_HEADERS,
-          body: JSON.stringify(body),
-        }
-      );
-
-      const data = await response.json();
-
-      if (data?.streamingData) {
-        console.log(`[YouTube] Got streaming data using client: ${client.clientName}`);
-        return data;
-      }
-
-      console.log(`[YouTube] No streaming data from ${client.clientName}, trying next...`);
-    } catch (err) {
-      console.error(`[YouTube] Client ${client.clientName} failed:`, err.message);
-    }
-  }
-
-  return null;
+  const data = await response.json();
+  console.log('[YouTube debug] playabilityStatus:', JSON.stringify(data?.playabilityStatus));
+  return data?.streamingData ? data : null;
 }
-
 exports.searchSongs = async (req, res) => {
   try {
     const { query } = req.params;
@@ -177,15 +128,13 @@ exports.getStreamUrl = async (req, res) => {
     const data = await fetchStreamingData(id);
 
     if (!data) {
-      return res.status(404).json({ error: 'No streaming data found for any client' });
+      return res.status(404).json({ error: 'No streaming data found' });
     }
 
-    // Prefer audio-only adaptive formats (best quality, smallest size)
     const audioFormats = (data.streamingData.adaptiveFormats || [])
       .filter(f => f.mimeType?.startsWith('audio/') && f.url)
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
-    // Fall back to muxed formats (audio+video combined) if no audio-only
     const regularFormats = (data.streamingData.formats || [])
       .filter(f => f.url)
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
