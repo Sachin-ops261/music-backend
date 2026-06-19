@@ -90,34 +90,47 @@ async function extractStreamInfo(videoId) {
   let artist = 'Unknown Artist';
   let duration = 0;
 
-  // Try all possible places the stream URL could be
-  if (data && data.link) {
-    streamUrl = data.link;
-    console.log('[YTStream] Found stream URL in data.link');
-  } else if (data && data.url) {
-    streamUrl = data.url;
-    console.log('[YTStream] Found stream URL in data.url');
-  } else if (data && data.formats) {
-    const audioFormat = data.formats.find(f => f.mimeType?.includes('audio') || f.audioQuality);
-    if (audioFormat && audioFormat.url) {
+  // FIRST: Try to find audio-only formats in adaptiveFormats (best quality)
+  if (data && data.adaptiveFormats) {
+    console.log('[YTStream] Looking in adaptiveFormats for audio...');
+    const audioFormats = data.adaptiveFormats.filter(f => 
+      f.mimeType?.startsWith('audio') && f.url
+    ).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0)); // Highest bitrate first
+    
+    if (audioFormats.length > 0) {
+      streamUrl = audioFormats[0].url;
+      mimeType = audioFormats[0].mimeType || mimeType;
+      console.log('[YTStream] Found audio stream in adaptiveFormats:', streamUrl);
+    }
+  }
+  
+  // If no audio-only found, look in formats
+  if (!streamUrl && data && data.formats) {
+    console.log('[YTStream] Looking in formats...');
+    const audioFormat = data.formats.find(f => 
+      (f.mimeType?.includes('audio') || f.audioQuality) && f.url
+    );
+    if (audioFormat) {
       streamUrl = audioFormat.url;
       mimeType = audioFormat.mimeType || mimeType;
-      console.log('[YTStream] Found stream URL in data.formats (audio)');
+      console.log('[YTStream] Found stream in formats:', streamUrl);
     } else {
       const firstFormat = data.formats.find(f => f.url);
       if (firstFormat) {
         streamUrl = firstFormat.url;
         mimeType = firstFormat.mimeType || mimeType;
-        console.log('[YTStream] Found stream URL in data.formats (first)');
+        console.log('[YTStream] Using first format from formats:', streamUrl);
       }
     }
-  } else if (data && data.adaptiveFormats) {
-    const audioFormat = data.adaptiveFormats.find(f => f.mimeType?.startsWith('audio') && f.url);
-    if (audioFormat) {
-      streamUrl = audioFormat.url;
-      mimeType = audioFormat.mimeType || mimeType;
-      console.log('[YTStream] Found stream URL in data.adaptiveFormats');
-    }
+  }
+  
+  // Fallback to link/url if they exist
+  if (!streamUrl && data && data.link) {
+    streamUrl = data.link;
+    console.log('[YTStream] Fallback to data.link:', streamUrl);
+  } else if (!streamUrl && data && data.url) {
+    streamUrl = data.url;
+    console.log('[YTStream] Fallback to data.url:', streamUrl);
   }
 
   if (data && data.title) title = data.title;
@@ -191,14 +204,16 @@ exports.proxyStream = async (req, res) => {
 
     console.log('[YTStream Proxy] Starting proxy request for video:', id);
     
-    const { streamUrl, mimeType, title, rawData } = await extractStreamInfo(id);
+    const { streamUrl, mimeType, title } = await extractStreamInfo(id);
     console.log('[YTStream Proxy] Got stream URL:', streamUrl);
 
-    // Fetch the audio from Google with better error handling
+    // Fetch the audio from Google with proper headers
     console.log('[YTStream Proxy] Fetching audio from:', streamUrl);
     const audioResponse = await fetch(streamUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com',
       },
     });
 
@@ -211,17 +226,21 @@ exports.proxyStream = async (req, res) => {
     console.log('[YTStream Proxy] Audio response ok, starting to stream');
 
     // Set appropriate headers for streaming
+    const contentLength = audioResponse.headers.get('content-length');
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(title)}.mp3"`);
+    
+    if (contentLength) {
+      res.setHeader('Content-Length', contentLength);
+    }
 
-    // For simplicity, we'll just send the entire buffer
-    // This works for most cases, though not ideal for very large files
+    // Stream the response directly to the client
     const arrayBuffer = await audioResponse.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    
-    res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
     
     console.log('[YTStream Proxy] Stream completed successfully');
