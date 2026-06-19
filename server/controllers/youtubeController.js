@@ -90,63 +90,59 @@ async function extractStreamInfo(videoId) {
   let artist = 'Unknown Artist';
   let duration = 0;
 
-  // FIRST: Try to find audio-only formats in adaptiveFormats (best quality)
-  if (data && data.adaptiveFormats) {
-    console.log('[YTStream] Looking in adaptiveFormats for audio...');
-    const audioFormats = data.adaptiveFormats.filter(f => 
-      f.mimeType?.startsWith('audio') && f.url
-    ).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0)); // Highest bitrate first
-    
-    if (audioFormats.length > 0) {
-      streamUrl = audioFormats[0].url;
-      mimeType = audioFormats[0].mimeType || mimeType;
-      console.log('[YTStream] Found audio stream in adaptiveFormats:', streamUrl);
-    }
-  }
-  
-  // If no audio-only found, look in formats
-  if (!streamUrl && data && data.formats) {
-    console.log('[YTStream] Looking in formats...');
-    const audioFormat = data.formats.find(f => 
-      (f.mimeType?.includes('audio') || f.audioQuality) && f.url
-    );
-    if (audioFormat) {
-      streamUrl = audioFormat.url;
-      mimeType = audioFormat.mimeType || mimeType;
-      console.log('[YTStream] Found stream in formats:', streamUrl);
-    } else {
-      const firstFormat = data.formats.find(f => f.url);
-      if (firstFormat) {
-        streamUrl = firstFormat.url;
-        mimeType = firstFormat.mimeType || mimeType;
-        console.log('[YTStream] Using first format from formats:', streamUrl);
+  // TRY EVERY POSSIBLE WAY TO GET A URL!
+  // 1. Try adaptiveFormats first (best audio quality)
+  if (data && data.adaptiveFormats && Array.isArray(data.adaptiveFormats)) {
+    console.log('[YTStream] Checking adaptiveFormats...');
+    for (const format of data.adaptiveFormats) {
+      if (format && format.url) {
+        streamUrl = format.url;
+        mimeType = format.mimeType || mimeType;
+        console.log('[YTStream] Found URL in adaptiveFormats:', streamUrl);
+        break;
       }
     }
   }
   
-  // Fallback to link/url if they exist
+  // 2. Try formats
+  if (!streamUrl && data && data.formats && Array.isArray(data.formats)) {
+    console.log('[YTStream] Checking formats...');
+    for (const format of data.formats) {
+      if (format && format.url) {
+        streamUrl = format.url;
+        mimeType = format.mimeType || mimeType;
+        console.log('[YTStream] Found URL in formats:', streamUrl);
+        break;
+      }
+    }
+  }
+  
+  // 3. Try direct link/url fields
   if (!streamUrl && data && data.link) {
     streamUrl = data.link;
-    console.log('[YTStream] Fallback to data.link:', streamUrl);
+    console.log('[YTStream] Found URL in data.link:', streamUrl);
   } else if (!streamUrl && data && data.url) {
     streamUrl = data.url;
-    console.log('[YTStream] Fallback to data.url:', streamUrl);
+    console.log('[YTStream] Found URL in data.url:', streamUrl);
   }
 
+  // Extract metadata
   if (data && data.title) title = data.title;
   if (data && data.author) artist = data.author;
+  if (data && data.channelTitle && !artist) artist = data.channelTitle; // Fallback to channel name
   if (data && data.thumbnail) thumbnail = data.thumbnail;
   if (data && data.lengthSeconds) duration = parseInt(data.lengthSeconds, 10);
-  if (data && data.thumbnails && data.thumbnails.length > 0) {
-    thumbnail = data.thumbnails[data.thumbnails.length - 1]?.url || data.thumbnails[0]?.url;
+  if (data && data.thumbnails && Array.isArray(data.thumbnails) && data.thumbnails.length > 0) {
+    thumbnail = data.thumbnails[data.thumbnails.length - 1]?.url || data.thumbnails[0]?.url || '';
   }
 
   if (!streamUrl) {
-    console.error('[YTStream] No stream URL found in data');
+    console.error('[YTStream] No stream URL found in data!');
+    console.error('[YTStream] Data keys:', Object.keys(data));
     throw new Error('No stream URL found');
   }
 
-  console.log('[YTStream] Extracted stream info:', { streamUrl, mimeType, title, artist, duration });
+  console.log('[YTStream] FINAL stream info:', { streamUrl, mimeType, title, artist, duration });
 
   return { streamUrl, mimeType, title, artist, duration, thumbnail, rawData: data };
 }
