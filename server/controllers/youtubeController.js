@@ -78,6 +78,56 @@ async function getStreamFromYTStream(videoId) {
   return await response.json();
 }
 
+// Helper function to extract stream info (reused by both endpoints)
+async function extractStreamInfo(videoId) {
+  const data = await getStreamFromYTStream(videoId);
+  
+  let streamUrl = null;
+  let mimeType = 'audio/mp4';
+  let thumbnail = '';
+  let title = 'Unknown Title';
+  let artist = 'Unknown Artist';
+  let duration = 0;
+
+  if (data && data.link) {
+    streamUrl = data.link;
+  } else if (data && data.url) {
+    streamUrl = data.url;
+  } else if (data && data.formats) {
+    const audioFormat = data.formats.find(f => f.mimeType?.includes('audio') || f.audioQuality);
+    if (audioFormat && audioFormat.url) {
+      streamUrl = audioFormat.url;
+      mimeType = audioFormat.mimeType || mimeType;
+    } else {
+      const firstFormat = data.formats.find(f => f.url);
+      if (firstFormat) {
+        streamUrl = firstFormat.url;
+        mimeType = firstFormat.mimeType || mimeType;
+      }
+    }
+  } else if (data && data.adaptiveFormats) {
+    const audioFormat = data.adaptiveFormats.find(f => f.mimeType?.startsWith('audio') && f.url);
+    if (audioFormat) {
+      streamUrl = audioFormat.url;
+      mimeType = audioFormat.mimeType || mimeType;
+    }
+  }
+
+  if (data && data.title) title = data.title;
+  if (data && data.author) artist = data.author;
+  if (data && data.thumbnail) thumbnail = data.thumbnail;
+  if (data && data.lengthSeconds) duration = parseInt(data.lengthSeconds, 10);
+  if (data && data.thumbnails && data.thumbnails.length > 0) {
+    thumbnail = data.thumbnails[data.thumbnails.length - 1]?.url || data.thumbnails[0]?.url;
+  }
+
+  if (!streamUrl) {
+    throw new Error('No stream URL found');
+  }
+
+  return { streamUrl, mimeType, title, artist, duration, thumbnail, rawData: data };
+}
+
 exports.searchSongs = async (req, res) => {
   try {
     const { query } = req.params;
@@ -100,63 +150,14 @@ exports.getTrending = async (req, res) => {
   }
 };
 
+// Original endpoint - returns URL (good for mobile)
 exports.getStreamUrl = async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'Video ID required' });
 
-    console.log('[YTStream] Fetching stream for video:', id);
-    const data = await getStreamFromYTStream(id);
-    console.log('[YTStream] Response:', JSON.stringify(data, null, 2));
-
-    // Find the best audio format or use the direct link
-    let streamUrl = null;
-    let mimeType = 'audio/mp4';
-    let thumbnail = '';
-    let title = 'Unknown Title';
-    let artist = 'Unknown Artist';
-    let duration = 0;
-
-    // Try to extract audio stream from YTStream response
-    if (data && data.link) {
-      streamUrl = data.link;
-    } else if (data && data.url) {
-      streamUrl = data.url;
-    } else if (data && data.formats) {
-      // Look for audio-only formats first
-      const audioFormat = data.formats.find(f => f.mimeType?.includes('audio') || f.audioQuality);
-      if (audioFormat && audioFormat.url) {
-        streamUrl = audioFormat.url;
-        mimeType = audioFormat.mimeType || mimeType;
-      } else {
-        // Fallback to any format
-        const firstFormat = data.formats.find(f => f.url);
-        if (firstFormat) {
-          streamUrl = firstFormat.url;
-          mimeType = firstFormat.mimeType || mimeType;
-        }
-      }
-    } else if (data && data.adaptiveFormats) {
-      const audioFormat = data.adaptiveFormats.find(f => f.mimeType?.startsWith('audio') && f.url);
-      if (audioFormat) {
-        streamUrl = audioFormat.url;
-        mimeType = audioFormat.mimeType || mimeType;
-      }
-    }
-
-    // Get metadata
-    if (data && data.title) title = data.title;
-    if (data && data.author) artist = data.author;
-    if (data && data.thumbnail) thumbnail = data.thumbnail;
-    if (data && data.lengthSeconds) duration = parseInt(data.lengthSeconds, 10);
-    if (data && data.thumbnails && data.thumbnails.length > 0) {
-      thumbnail = data.thumbnails[data.thumbnails.length - 1]?.url || data.thumbnails[0]?.url;
-    }
-
-    if (!streamUrl) {
-      console.error('[YTStream] No stream URL found in response:', data);
-      return res.status(404).json({ error: 'No playable audio stream found' });
-    }
+    console.log('[YTStream] Fetching stream URL for video:', id);
+    const { streamUrl, mimeType, title, artist, duration, thumbnail } = await extractStreamInfo(id);
 
     res.json({
       url: streamUrl,
@@ -169,5 +170,47 @@ exports.getStreamUrl = async (req, res) => {
   } catch (err) {
     console.error('YTStream error:', err.message);
     res.status(500).json({ error: 'Stream failed: ' + err.message });
+  }
+};
+
+// New proxy endpoint - streams audio directly (good for web)
+exports.proxyStream = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: 'Video ID required' });
+
+    console.log('[YTStream Proxy] Fetching and proxying stream for video:', id);
+    const { streamUrl, mimeType, title } = await extractStreamInfo(id);
+
+    console.log('[YTStream Proxy] Streaming from:', streamUrl);
+
+    // Fetch the audio from Google
+    const audioResponse = await fetch(streamUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+
+    if (!audioResponse.ok) {
+      throw new Error('Failed to fetch audio stream');
+    }
+
+    // Set appropriate headers for streaming
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(title)}.mp3"`);
+
+    // For simplicity, we'll just send the entire buffer
+    // This works for most cases, though not ideal for very large files
+    const arrayBuffer = await audioResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+
+  } catch (err) {
+    console.error('YTStream proxy error:', err.message);
+    res.status(500).json({ error: 'Proxy stream failed: ' + err.message });
   }
 };
