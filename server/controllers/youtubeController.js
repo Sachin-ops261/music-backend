@@ -1,5 +1,7 @@
 // controllers/youtubeController.js
-const YT_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+require('dotenv').config();
+const YT_API_KEY = process.env.YOUTUBE_API_KEY;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 
 const WEB_HEADERS = {
   'Content-Type': 'application/json',
@@ -56,48 +58,26 @@ async function searchYouTubeWeb(query) {
   return extractVideos(rawItems).slice(0, 20);
 }
 
-// Single, well-formed ANDROID client request. The ANDROID client returns
-// direct, non-throttled URLs without needing signature deciphering, and
-// does not require the extra embed/thirdParty fields the TV/WEB embedded
-// clients need — which is what was likely causing every previous fallback
-// attempt to silently return no streamingData.
-async function fetchStreamingData(videoId) {
-  const body = {
-    videoId,
-    context: {
-      client: {
-        clientName: 'ANDROID',
-        clientVersion: '19.09.37',
-        androidSdkVersion: 30,
-        hl: 'en',
-        gl: 'US',
-        platform: 'MOBILE',
-      },
-    },
-    playbackContext: {
-      contentPlaybackContext: {
-        html5Preference: 'HTML5_PREF_WANTS',
-      },
-    },
-    contentCheckOk: true,
-    racyCheckOk: true,
-  };
-
-  const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${YT_API_KEY}`, {
-    method: 'POST',
+// New function to get stream URL from YTStream API
+async function getStreamFromYTStream(videoId) {
+  const url = `https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
     headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-      'X-YouTube-Client-Name': '3',
-      'X-YouTube-Client-Version': '19.09.37',
-    },
-    body: JSON.stringify(body),
+      'x-rapidapi-host': 'ytstream-download-youtube-videos.p.rapidapi.com',
+      'x-rapidapi-key': RAPIDAPI_KEY
+    }
   });
-
-  const data = await response.json();
-  console.log('[YouTube debug] playabilityStatus:', JSON.stringify(data?.playabilityStatus));
-  return data?.streamingData ? data : null;
+  
+  if (!response.ok) {
+    console.error('YTStream API error:', response.status, response.statusText);
+    throw new Error('Failed to fetch from YTStream');
+  }
+  
+  return await response.json();
 }
+
 exports.searchSongs = async (req, res) => {
   try {
     const { query } = req.params;
@@ -125,39 +105,69 @@ exports.getStreamUrl = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'Video ID required' });
 
-    const data = await fetchStreamingData(id);
+    console.log('[YTStream] Fetching stream for video:', id);
+    const data = await getStreamFromYTStream(id);
+    console.log('[YTStream] Response:', JSON.stringify(data, null, 2));
 
-    if (!data) {
-      return res.status(404).json({ error: 'No streaming data found' });
+    // Find the best audio format or use the direct link
+    let streamUrl = null;
+    let mimeType = 'audio/mp4';
+    let thumbnail = '';
+    let title = 'Unknown Title';
+    let artist = 'Unknown Artist';
+    let duration = 0;
+
+    // Try to extract audio stream from YTStream response
+    if (data && data.link) {
+      streamUrl = data.link;
+    } else if (data && data.url) {
+      streamUrl = data.url;
+    } else if (data && data.formats) {
+      // Look for audio-only formats first
+      const audioFormat = data.formats.find(f => f.mimeType?.includes('audio') || f.audioQuality);
+      if (audioFormat && audioFormat.url) {
+        streamUrl = audioFormat.url;
+        mimeType = audioFormat.mimeType || mimeType;
+      } else {
+        // Fallback to any format
+        const firstFormat = data.formats.find(f => f.url);
+        if (firstFormat) {
+          streamUrl = firstFormat.url;
+          mimeType = firstFormat.mimeType || mimeType;
+        }
+      }
+    } else if (data && data.adaptiveFormats) {
+      const audioFormat = data.adaptiveFormats.find(f => f.mimeType?.startsWith('audio') && f.url);
+      if (audioFormat) {
+        streamUrl = audioFormat.url;
+        mimeType = audioFormat.mimeType || mimeType;
+      }
     }
 
-    const audioFormats = (data.streamingData.adaptiveFormats || [])
-      .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    // Get metadata
+    if (data && data.title) title = data.title;
+    if (data && data.author) artist = data.author;
+    if (data && data.thumbnail) thumbnail = data.thumbnail;
+    if (data && data.lengthSeconds) duration = parseInt(data.lengthSeconds, 10);
+    if (data && data.thumbnails && data.thumbnails.length > 0) {
+      thumbnail = data.thumbnails[data.thumbnails.length - 1]?.url || data.thumbnails[0]?.url;
+    }
 
-    const regularFormats = (data.streamingData.formats || [])
-      .filter(f => f.url)
-      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-
-    const format = audioFormats[0] || regularFormats[0];
-
-    if (!format?.url) {
+    if (!streamUrl) {
+      console.error('[YTStream] No stream URL found in response:', data);
       return res.status(404).json({ error: 'No playable audio stream found' });
     }
 
-    const basicInfo = data.videoDetails || {};
-    const thumbnail = basicInfo.thumbnail?.thumbnails?.slice(-1)[0]?.url || '';
-
     res.json({
-      url: format.url,
-      mimeType: format.mimeType || 'audio/mp4',
-      title: basicInfo.title || 'Unknown Title',
-      artist: basicInfo.author || 'Unknown Artist',
-      duration: parseInt(basicInfo.lengthSeconds || '0', 10),
+      url: streamUrl,
+      mimeType,
+      title,
+      artist,
+      duration,
       thumbnail,
     });
   } catch (err) {
-    console.error('YouTube stream error:', err.message);
+    console.error('YTStream error:', err.message);
     res.status(500).json({ error: 'Stream failed: ' + err.message });
   }
 };
