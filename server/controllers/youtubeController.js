@@ -81,6 +81,7 @@ async function getStreamFromYTStream(videoId) {
 // Helper function to extract stream info (reused by both endpoints)
 async function extractStreamInfo(videoId) {
   const data = await getStreamFromYTStream(videoId);
+  console.log('[YTStream] Full response data:', JSON.stringify(data, null, 2));
   
   let streamUrl = null;
   let mimeType = 'audio/mp4';
@@ -89,20 +90,25 @@ async function extractStreamInfo(videoId) {
   let artist = 'Unknown Artist';
   let duration = 0;
 
+  // Try all possible places the stream URL could be
   if (data && data.link) {
     streamUrl = data.link;
+    console.log('[YTStream] Found stream URL in data.link');
   } else if (data && data.url) {
     streamUrl = data.url;
+    console.log('[YTStream] Found stream URL in data.url');
   } else if (data && data.formats) {
     const audioFormat = data.formats.find(f => f.mimeType?.includes('audio') || f.audioQuality);
     if (audioFormat && audioFormat.url) {
       streamUrl = audioFormat.url;
       mimeType = audioFormat.mimeType || mimeType;
+      console.log('[YTStream] Found stream URL in data.formats (audio)');
     } else {
       const firstFormat = data.formats.find(f => f.url);
       if (firstFormat) {
         streamUrl = firstFormat.url;
         mimeType = firstFormat.mimeType || mimeType;
+        console.log('[YTStream] Found stream URL in data.formats (first)');
       }
     }
   } else if (data && data.adaptiveFormats) {
@@ -110,6 +116,7 @@ async function extractStreamInfo(videoId) {
     if (audioFormat) {
       streamUrl = audioFormat.url;
       mimeType = audioFormat.mimeType || mimeType;
+      console.log('[YTStream] Found stream URL in data.adaptiveFormats');
     }
   }
 
@@ -122,8 +129,11 @@ async function extractStreamInfo(videoId) {
   }
 
   if (!streamUrl) {
+    console.error('[YTStream] No stream URL found in data');
     throw new Error('No stream URL found');
   }
+
+  console.log('[YTStream] Extracted stream info:', { streamUrl, mimeType, title, artist, duration });
 
   return { streamUrl, mimeType, title, artist, duration, thumbnail, rawData: data };
 }
@@ -179,12 +189,13 @@ exports.proxyStream = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'Video ID required' });
 
-    console.log('[YTStream Proxy] Fetching and proxying stream for video:', id);
-    const { streamUrl, mimeType, title } = await extractStreamInfo(id);
+    console.log('[YTStream Proxy] Starting proxy request for video:', id);
+    
+    const { streamUrl, mimeType, title, rawData } = await extractStreamInfo(id);
+    console.log('[YTStream Proxy] Got stream URL:', streamUrl);
 
-    console.log('[YTStream Proxy] Streaming from:', streamUrl);
-
-    // Fetch the audio from Google
+    // Fetch the audio from Google with better error handling
+    console.log('[YTStream Proxy] Fetching audio from:', streamUrl);
     const audioResponse = await fetch(streamUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -192,8 +203,12 @@ exports.proxyStream = async (req, res) => {
     });
 
     if (!audioResponse.ok) {
-      throw new Error('Failed to fetch audio stream');
+      const errorText = await audioResponse.text().catch(() => 'No error text');
+      console.error('[YTStream Proxy] Failed to fetch audio:', audioResponse.status, audioResponse.statusText, errorText);
+      throw new Error(`Failed to fetch audio: ${audioResponse.status} ${audioResponse.statusText}`);
     }
+
+    console.log('[YTStream Proxy] Audio response ok, starting to stream');
 
     // Set appropriate headers for streaming
     res.setHeader('Content-Type', mimeType);
@@ -208,9 +223,14 @@ exports.proxyStream = async (req, res) => {
     
     res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
+    
+    console.log('[YTStream Proxy] Stream completed successfully');
 
   } catch (err) {
-    console.error('YTStream proxy error:', err.message);
-    res.status(500).json({ error: 'Proxy stream failed: ' + err.message });
+    console.error('[YTStream Proxy] Full error:', err);
+    res.status(500).json({ 
+      error: 'Proxy stream failed: ' + err.message,
+      details: err.stack || 'No stack trace available'
+    });
   }
 };
