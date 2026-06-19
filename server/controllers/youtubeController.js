@@ -7,6 +7,8 @@ const WEB_HEADERS = {
   'Content-Type': 'application/json',
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
   'Accept-Language': 'en-US,en;q=0.9',
+  'Origin': 'https://www.youtube.com',
+  'Referer': 'https://www.youtube.com/',
 };
 
 function extractVideos(items) {
@@ -58,7 +60,7 @@ async function searchYouTubeWeb(query) {
     headers: WEB_HEADERS,
     body: JSON.stringify({
       query,
-      params: 'EgIQAQ%3D%3D',
+      params: 'EgIQAQ%3D%3D', // filter: only videos
       context: {
         client: {
           clientName: 'WEB',
@@ -72,6 +74,77 @@ async function searchYouTubeWeb(query) {
   const data = await response.json();
   const rawItems = walkContents(data?.contents || data?.onResponseReceivedCommands || {});
   return extractVideos(rawItems).slice(0, 20);
+}
+
+// Try multiple clients in order until one returns streaming data.
+// TV_EMBEDDED is the most reliable unauthenticated client as of 2025.
+// WEB_EMBEDDED is the fallback.
+async function fetchStreamingData(videoId) {
+  const clients = [
+    {
+      // TV Embedded — most reliable, bypasses many restrictions
+      clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+      clientVersion: '2.0',
+      extra: {
+        thirdParty: { embedUrl: 'https://www.youtube.com/' },
+      },
+    },
+    {
+      // Web Embedded — fallback
+      clientName: 'WEB_EMBEDDED_PLAYER',
+      clientVersion: '2.20231121.09.00',
+      extra: {
+        thirdParty: { embedUrl: 'https://www.youtube.com/' },
+      },
+    },
+    {
+      // Plain WEB — last resort
+      clientName: 'WEB',
+      clientVersion: '2.20231121.09.00',
+      extra: {},
+    },
+  ];
+
+  for (const client of clients) {
+    try {
+      const body = {
+        videoId,
+        context: {
+          client: {
+            clientName: client.clientName,
+            clientVersion: client.clientVersion,
+            hl: 'en',
+            gl: 'US',
+          },
+          ...client.extra,
+        },
+        racyCheckOk: true,
+        contentCheckOk: true,
+      };
+
+      const response = await fetch(
+        `https://www.youtube.com/youtubei/v1/player?key=${YT_API_KEY}`,
+        {
+          method: 'POST',
+          headers: WEB_HEADERS,
+          body: JSON.stringify(body),
+        }
+      );
+
+      const data = await response.json();
+
+      if (data?.streamingData) {
+        console.log(`[YouTube] Got streaming data using client: ${client.clientName}`);
+        return data;
+      }
+
+      console.log(`[YouTube] No streaming data from ${client.clientName}, trying next...`);
+    } catch (err) {
+      console.error(`[YouTube] Client ${client.clientName} failed:`, err.message);
+    }
+  }
+
+  return null;
 }
 
 exports.searchSongs = async (req, res) => {
@@ -101,41 +174,25 @@ exports.getStreamUrl = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'Video ID required' });
 
-    const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${YT_API_KEY}`, {
-      method: 'POST',
-      headers: WEB_HEADERS,
-      body: JSON.stringify({
-        videoId: id,
-        context: {
-          client: {
-            clientName: 'ANDROID',
-            clientVersion: '17.31.35',
-            androidSdkVersion: 30,
-            hl: 'en',
-            gl: 'US',
-            utcOffsetMinutes: 0,
-          },
-        },
-      }),
-    });
+    const data = await fetchStreamingData(id);
 
-    const data = await response.json();
-
-    if (!data.streamingData) {
-      return res.status(404).json({ error: 'No streaming data found' });
+    if (!data) {
+      return res.status(404).json({ error: 'No streaming data found for any client' });
     }
 
+    // Prefer audio-only adaptive formats (best quality, smallest size)
     const audioFormats = (data.streamingData.adaptiveFormats || [])
       .filter(f => f.mimeType?.startsWith('audio/') && f.url)
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
+    // Fall back to muxed formats (audio+video combined) if no audio-only
     const regularFormats = (data.streamingData.formats || [])
       .filter(f => f.url)
       .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
     const format = audioFormats[0] || regularFormats[0];
 
-    if (!format || !format.url) {
+    if (!format?.url) {
       return res.status(404).json({ error: 'No playable audio stream found' });
     }
 
