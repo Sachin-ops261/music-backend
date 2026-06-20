@@ -1,23 +1,8 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/proxy.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/index.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/proxy",
-      "dest": "api/proxy.js"
-    },
-    {
-      "src": "/api/(.*)",
-      "dest": "api/index.js"
-    }
+  "rewrites": [
+    { "source": "/api/songs", "destination": "/api/index" },
+    { "source": "/api/songs/:path*", "destination": "/api/index" },
+    { "source": "/api/youtube/:path*", "destination": "/api/index" }
   ]
 }
