@@ -91,16 +91,24 @@ async function extractStreamInfo(videoId) {
   let duration = 0;
 
   // TRY EVERY POSSIBLE WAY TO GET A URL!
-  // 1. Try adaptiveFormats first (best audio quality)
+  // 1. Try adaptiveFormats first (best audio quality) - ONLY AUDIO!
   if (data && data.adaptiveFormats && Array.isArray(data.adaptiveFormats)) {
-    console.log('[YTStream] Checking adaptiveFormats...');
+    console.log('[YTStream] Checking adaptiveFormats for AUDIO...');
+    let bestAudio = null;
+    let highestBitrate = -1;
     for (const format of data.adaptiveFormats) {
-      if (format && format.url) {
-        streamUrl = format.url;
-        mimeType = format.mimeType || mimeType;
-        console.log('[YTStream] Found URL in adaptiveFormats:', streamUrl);
-        break;
+      if (format && format.url && format.mimeType?.startsWith('audio/')) {
+        const bitrate = format.bitrate || 0;
+        if (bitrate > highestBitrate) {
+          highestBitrate = bitrate;
+          bestAudio = format;
+        }
       }
+    }
+    if (bestAudio) {
+      streamUrl = bestAudio.url;
+      mimeType = bestAudio.mimeType || mimeType;
+      console.log('[YTStream] Found AUDIO URL in adaptiveFormats:', streamUrl);
     }
   }
   
@@ -203,41 +211,62 @@ exports.proxyStream = async (req, res) => {
     const { streamUrl, mimeType, title } = await extractStreamInfo(id);
     console.log('[YTStream Proxy] Got stream URL:', streamUrl);
 
+    // Prepare headers for the upstream request
+    const upstreamHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': 'https://www.youtube.com/',
+      'Origin': 'https://www.youtube.com',
+    };
+
+    // Forward range request if present
+    if (req.headers.range) {
+      upstreamHeaders['Range'] = req.headers.range;
+    }
+
     // Fetch the audio from Google with proper headers
-    console.log('[YTStream Proxy] Fetching audio from:', streamUrl);
+    console.log('[YTStream Proxy] Fetching audio from:', streamUrl, 'with headers:', upstreamHeaders);
     const audioResponse = await fetch(streamUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Origin': 'https://www.youtube.com',
-      },
+      headers: upstreamHeaders,
     });
 
-    if (!audioResponse.ok) {
+    if (!audioResponse.ok && audioResponse.status !== 206) {
       const errorText = await audioResponse.text().catch(() => 'No error text');
       console.error('[YTStream Proxy] Failed to fetch audio:', audioResponse.status, audioResponse.statusText, errorText);
       throw new Error(`Failed to fetch audio: ${audioResponse.status} ${audioResponse.statusText}`);
     }
 
-    console.log('[YTStream Proxy] Audio response ok, starting to stream');
+    console.log('[YTStream Proxy] Audio response ok, status:', audioResponse.status);
 
     // Set appropriate headers for streaming
-    const contentLength = audioResponse.headers.get('content-length');
+    res.status(audioResponse.status);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(title)}.mp3"`);
     
+    // Forward relevant headers from upstream
+    const contentLength = audioResponse.headers.get('content-length');
+    const contentRange = audioResponse.headers.get('content-range');
     if (contentLength) {
       res.setHeader('Content-Length', contentLength);
     }
+    if (contentRange) {
+      res.setHeader('Content-Range', contentRange);
+    }
 
     // Stream the response directly to the client
-    const arrayBuffer = await audioResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    res.send(buffer);
+    if (audioResponse.body) {
+      // Use Node.js stream for better performance
+      const body = Buffer.from(await audioResponse.arrayBuffer());
+      res.send(body);
+    } else {
+      // Fallback to arrayBuffer
+      const arrayBuffer = await audioResponse.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      res.send(buffer);
+    }
     
     console.log('[YTStream Proxy] Stream completed successfully');
 

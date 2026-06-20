@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "d621bdc6-b1d1-4cd0-97fa-c909af112fc0"
+      }
+    },
+    "android": {
+      "package": "com.kalu142.musicapp"
+    }
+  }
+}
