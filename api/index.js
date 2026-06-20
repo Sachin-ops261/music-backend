@@ -1,5 +1,5 @@
 require('dotenv').config();
-const app = require('../app'); // Changed from '../vercel'
+const app = require('../server/app'); // Changed from '../vercel'
 
 console.log('SERVER API ENTRYPOINT LOADED: cwd=', process.cwd(), '__dirname=', __dirname);
 console.log('SERVER ENV CHECK:', {

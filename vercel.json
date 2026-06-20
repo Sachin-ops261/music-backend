@@ -1,13 +1,15 @@
 {
   "version": 2,
-  "functions": {
-    "api/proxy.js": {
-      "runtime": "edge"
+  "builds": [
+    {
+      "src": "api/proxy.js",
+      "use": "@vercel/node"
     },
-    "api/index.js": {
-      "maxDuration": 60
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node"
     }
-  },
+  ],
   "routes": [
     {
       "src": "/api/proxy",
